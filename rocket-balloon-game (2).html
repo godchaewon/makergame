@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>아케이드 버튼 게임</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #100f28;
+  }
+  #stage-wrap {
+    width: 100vw;
+    height: 100vh;
+    position: relative;
+  }
+  canvas { display: block; }
+
+  #startBtn {
+    position: absolute;
+    left: 50%;
+    bottom: 8%;
+    transform: translateX(-50%);
+    padding: 16px 52px;
+    font-family: 'Fredoka', 'Apple SD Gothic Neo', 'Malgun Gothic', system-ui, sans-serif;
+    font-weight: 700;
+    font-size: clamp(20px, 3vw, 30px);
+    color: #2a1a4a;
+    background: linear-gradient(180deg, #ffe08a, #ffb703);
+    border: none;
+    border-radius: 999px;
+    box-shadow: 0 8px 0 #d98f00, 0 14px 24px rgba(0,0,0,0.35);
+    cursor: pointer;
+    letter-spacing: 0.02em;
+  }
+  #startBtn:active {
+    transform: translateX(-50%) translateY(6px);
+    box-shadow: 0 2px 0 #d98f00, 0 6px 14px rgba(0,0,0,0.3);
+  }
+</style>
+</head>
+<body>
+
+<div id="stage-wrap">
+  <button id="startBtn">시작</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.4/p5.min.js"></script>
+<script>
+  // =====================================================
+  //  공통 설정
+  // =====================================================
+  const KEY_COLORS = {
+    a: [230, 70, 70],
+    s: [255, 150, 40],
+    d: [255, 210, 60],
+    f: [95, 195, 110],
+    g: [55, 195, 200],
+    h: [70, 120, 225],
+    j: [150, 95, 215],
+    k: [235, 105, 170],
+  };
+  const KEY_ORDER = ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k'];
+
+  const PRESSES_PER_PLAYER = 50;  // 인원 1명당 눌러야 하는 횟수 (1명 50번 → 8명 400번)
+  const RACE_TARGET = 50;         // 달리기: 선수 1명이 결승선까지 눌러야 하는 횟수
+  const GAME_ORDER = ['balloon', 'rocket', 'egg', 'run'];
+  const COUNTDOWN_FRAMES = 60;
+  const RESULT_FRAMES = 240;
+  const UI_FONT = 'sans-serif';
+
+  let gameState = 'ready'; // ready | countdown | balloon | rocket | egg | run | result
+  let gameIdx = 0;
+  let activeKeys = [];
+  let playerCount = 1;
+  let targetPresses = PRESSES_PER_PLAYER;
+  let totalPresses = 0;
+  let pressCounts = {};
+  let keyState = {};
+  let canvasW, canvasH;
+  let stars = [];
+  let crowd = [];
+  let confetti = [];
+
+  let readyPlayers = {};
+  let pulseTime = {};
+
+  let countdownValue = 3;
+  let countdownTimer = 0;
+  let resultTimer = 0;
+  let resultKeys = [];
+
+  // ---------- 사운드 ----------
+  let audioCtx = null;
+  function getAudio() {
+    try {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC();
+      }
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return audioCtx;
+    } catch (e) { return null; }
+  }
+  function tone(f0, f1, dur, type, vol, delay) {
+    const ctx = getAudio();
+    if (!ctx) return;
+    try {
+      const t = ctx.currentTime + (delay || 0);
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t);
+      o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(vol, t + Math.min(0.03, dur / 3));
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g);
+      g.connect(ctx.destination);
+      o.start(t);
+      o.stop(t + dur + 0.02);
+    } catch (e) {}
+  }
+  function playFanfare() {
+    [523, 659, 784, 1047].forEach((f, i) => tone(f, f * 1.01, 0.2, 'triangle', 0.22, i * 0.12));
+  }
+
+  // ---------- 그리기 도우미 ----------
+  function vGradient(y0, y1, c0, c1, ease) {
+    const g = drawingContext.createLinearGradient(0, y0, 0, y1);
+    for (let i = 0; i <= 8; i++) {
+      const t = i / 8;
+      const f = Math.pow(t, ease || 1);
+      const r = c0[0] + (c1[0] - c0[0]) * f;
+      const gg = c0[1] + (c1[1] - c0[1]) * f;
+      const b = c0[2] + (c1[2] - c0[2]) * f;
+      g.addColorStop(t, 'rgb(' + (r | 0) + ',' + (gg | 0) + ',' + (b | 0) + ')');
+    }
+    drawingContext.fillStyle = g;
+    drawingContext.fillRect(0, y0, canvasW, y1 - y0);
+  }
+
+  function easeOutBack(x) {
+    const c1 = 1.70158, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2);
+  }
+
+  function spawnConfetti(n, cols) {
+    for (let i = 0; i < n; i++) {
+      confetti.push({
+        x: random(canvasW), y: random(-canvasH, 0),
+        vx: random(-1, 1), vy: random(2, 5) * canvasH / 800,
+        rot: random(TWO_PI), vr: random(-0.2, 0.2),
+        s: random(7, 13) * canvasH / 800,
+        col: cols[Math.floor(random(cols.length))]
+      });
+    }
+  }
+  function drawConfetti() {
+    noStroke();
+    for (const c of confetti) {
+      c.x += c.vx + Math.sin(c.y * 0.02) * 0.6;
+      c.y += c.vy;
+      c.rot += c.vr;
+      push();
+      translate(c.x, c.y);
+      rotate(c.rot);
+      fill(c.col[0], c.col[1], c.col[2]);
+      rect(-c.s / 2, -c.s * 0.3, c.s, c.s * 0.6);
+      pop();
+    }
+    confetti = confetti.filter(c => c.y < canvasH + 30);
+  }
+
+  // ---------- 구슬 물리 (Verlet) ----------
+  function resolveCollisions(list, r) {
+    const n = list.length;
+    if (n < 2) return;
+    const cell = r * 2;
+    const grid = new Map();
+    for (let i = 0; i < n; i++) {
+      const m = list[i];
+      const key = (Math.floor(m.x / cell) + 64) * 4096 + (Math.floor(m.y / cell) + 64);
+      let arr = grid.get(key);
+      if (!arr) { arr = []; grid.set(key, arr); }
+      arr.push(i);
+    }
+    const minD = r * 2, minD2 = minD * minD;
+    for (let i = 0; i < n; i++) {
+      const a = list[i];
+      const cx = Math.floor(a.x / cell), cy = Math.floor(a.y / cell);
+      for (let ox = -1; ox <= 1; ox++) {
+        for (let oy = -1; oy <= 1; oy++) {
+          const arr = grid.get((cx + ox + 64) * 4096 + (cy + oy + 64));
+          if (!arr) continue;
+          for (let q = 0; q < arr.length; q++) {
+            const j = arr[q];
+            if (j <= i) continue;
+            const b = list[j];
+            let dx = b.x - a.x, dy = b.y - a.y;
+            const d2 = dx * dx + dy * dy;
+            if (d2 < minD2) {
+              let d = Math.sqrt(d2);
+              if (d < 0.0001) { dx = Math.random() - 0.5; dy = -1; d = Math.sqrt(dx * dx + 1); }
+              const ov = (minD - d) / 2;
+              const nx = dx / d, ny = dy / d;
+              a.x -= nx * ov; a.y -= ny * ov;
+              b.x += nx * ov; b.y += ny * ov;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  function stepMarbles(list, gravity, damp, r, constrainFn) {
+    for (const m of list) {
+      const vx = (m.x - m.px) * damp;
+      const vy = (m.y - m.py) * damp + gravity;
+      m.px = m.x; m.py = m.y;
+      m.x += vx; m.y += vy;
+    }
+    for (let pass = 0; pass < 4; pass++) {
+      resolveCollisions(list, r);
+      for (const m of list) constrainFn(m);
+    }
+  }
+
+  function drawMarble(m, ox, oy) {
+    noStroke();
+    fill(m.col[0], m.col[1], m.col[2]);
+    circle(m.x - ox, m.y - oy, m.r * 2);
+    fill(255, 255, 255, 90);
+    circle(m.x - ox - m.r * 0.3, m.y - oy - m.r * 0.3, m.r * 0.7);
+  }
+
+  // =====================================================
+  //  진행 관리
+  // =====================================================
+  function gameProgress() { return constrain(totalPresses / Math.max(1, targetPresses), 0, 1); }
+  function registerPress(k) { pressCounts[k]++; totalPresses++; }
+  function readyList() { return KEY_ORDER.filter(k => readyPlayers[k]); }
+
+  function resetReady() {
+    for (const k of KEY_ORDER) { readyPlayers[k] = false; pulseTime[k] = -999; }
+  }
+
+  function onStartClick() {
+    if (gameState !== 'ready') return;
+    const list = readyList();
+    if (list.length === 0) return;
+    getAudio();
+    const el = document.documentElement;
+    if (!document.fullscreenElement) {
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    }
+    activeKeys = list;
+    playerCount = list.length;
+    targetPresses = PRESSES_PER_PLAYER * playerCount;
+    gameIdx = 0;
+    computeScale();
+    startCountdown();
+  }
+
+  function startCountdown() {
+    gameState = 'countdown';
+    countdownValue = 3;
+    countdownTimer = 0;
+  }
+
+  function startGame(name) {
+    totalPresses = 0;
+    for (const k of KEY_ORDER) pressCounts[k] = 0;
+    confetti = [];
+    computeScale();
+    if (name === 'balloon') resetBalloonState();
+    else if (name === 'rocket') resetRocketState();
+    else if (name === 'egg') resetEggState();
+    else if (name === 'run') resetRunState();
+    gameState = name;
+  }
+
+  function finishGame() {
+    let mx = 0;
+    for (const k of activeKeys) mx = Math.max(mx, pressCounts[k]);
+    resultKeys = mx > 0 ? activeKeys.filter(k => pressCounts[k] === mx) : [];
+    resultTimer = 0;
+    confetti = [];
+    const cols = (resultKeys.length ? resultKeys : activeKeys).map(k => KEY_COLORS[k]);
+    spawnConfetti(110, cols);
+    gameState = 'result';
+    playFanfare();
+  }
+
+  // =====================================================
+  //  크기 계산
+  // =====================================================
+  function updateCanvasSize() {
+    canvasW = window.innerWidth;
+    canvasH = window.innerHeight;
+  }
+
+  function computeScale() {
+    const H = canvasH, W = canvasW;
+    const N = Math.max(1, targetPresses);
+
+    // 풍선: 마지막에 풍선 넓이의 약 50%를 구슬이 채우도록 구슬 크기를 정함
+    balloonStartR = H * 0.07;
+    balloonMaxR = H * 0.32;
+    balloonMarbleR = Math.min(H * 0.03, balloonMaxR * Math.sqrt(0.5 / N));
+
+    // 로켓
+    rocketW = H * 0.15;
+    rocketH = H * 0.5;
+    rocketGroundY = H * 0.82;
+    rocketWinHalfW = H * 0.058;
+    rocketWinStraightH = H * 0.11;
+    const capArea = Math.PI * rocketWinHalfW * rocketWinHalfW + 4 * rocketWinHalfW * rocketWinStraightH;
+    rocketMarbleR = Math.min(H * 0.02, Math.sqrt(0.5 * capArea / (N * Math.PI)));
+
+    // 공룡알
+    eggA = H * 0.19;
+    eggB = H * 0.27;
+    eggCX = W / 2;
+    eggCY = H * 0.5;
+    eggSpotR = Math.min(H * 0.025, Math.sqrt(0.45 * eggA * eggB / N));
+
+    // 달리기
+    const n = Math.max(1, playerCount);
+    laneH = Math.min(H * 0.16, H * 0.7 / n);
+    blockTop = H * 0.58 - n * laneH / 2;
+    startX = W * 0.1;
+    finishX = W * 0.88;
+    runnerR = laneH * 0.32;
+  }
+
+  // =====================================================
+  //  p5 기본 함수
+  // =====================================================
+  function setup() {
+    updateCanvasSize();
+    const c = createCanvas(canvasW, canvasH);
+    c.parent('stage-wrap');
+    textFont(UI_FONT);
+    for (const k of KEY_ORDER) {
+      keyState[k] = false;
+      readyPlayers[k] = false;
+      pulseTime[k] = -999;
+      pressCounts[k] = 0;
+    }
+    for (let i = 0; i < 90; i++) {
+      stars.push({ x: random(1), y: random(0.8), r: random(0.6, 2), tw: random(1000) });
+    }
+    const pal = [[240, 120, 120], [250, 200, 90], [120, 190, 240], [160, 220, 150], [230, 150, 220]];
+    for (let i = 0; i < 260; i++) {
+      crowd.push({ x: random(1), y: random(1), col: pal[Math.floor(random(pal.length))] });
+    }
+    computeScale();
+    resetBalloonState();
+    document.getElementById('startBtn').addEventListener('click', onStartClick);
+  }
+
+  function windowResized() {
+    updateCanvasSize();
+    resizeCanvas(canvasW, canvasH);
+    computeScale();
+  }
+
+  function draw() {
+    const btn = document.getElementById('startBtn');
+    btn.style.display = (gameState === 'ready') ? 'block' : 'none';
+    btn.style.opacity = readyList().length > 0 ? '1' : '0.45';
+
+    if (gameState === 'ready') drawReadyScreen();
+    else if (gameState === 'countdown') drawCountdown();
+    else if (gameState === 'balloon') drawBalloonScene();
+    else if (gameState === 'rocket') drawRocketScene();
+    else if (gameState === 'egg') drawEggScene();
+    else if (gameState === 'run') drawRunScene();
+    else if (gameState === 'result') drawResult();
+  }
+
+  // =====================================================
+  //  레디 / 카운트다운 / 결과 화면
+  // =====================================================
+  function drawLobbyBackground() {
+    vGradient(0, canvasH, [16, 12, 40], [46, 24, 74], 1);
+    noStroke();
+    for (let s of stars) {
+      const a = 90 + 90 * Math.sin(frameCount * 0.03 + s.tw);
+      fill(255, 255, 255, Math.max(0, a));
+      circle(s.x * canvasW, s.y * canvasH, s.r + s.r * 0.4 * (a / 180));
+    }
+  }
+
+  function drawReadyScreen() {
+    drawLobbyBackground();
+    const n = KEY_ORDER.length;
+    const spacing = Math.min(canvasW * 0.11, canvasH * 0.16);
+    const baseR = Math.min(canvasW * 0.05, canvasH * 0.075);
+    const sx = canvasW / 2 - spacing * (n - 1) / 2;
+    const cy = canvasH * 0.42;
+
+    for (let i = 0; i < n; i++) {
+      const k = KEY_ORDER[i];
+      const col = KEY_COLORS[k];
+      const x = sx + spacing * i;
+      const pulse = constrain(1 - (frameCount - pulseTime[k]) / 24, 0, 1);
+      const r = baseR * (1 + pulse * 0.35);
+      noStroke();
+      if (readyPlayers[k]) {
+        fill(255, 255, 255, 60 + pulse * 80);
+        circle(x, cy, r * 2 + 18 + pulse * 14);
+        fill(col[0], col[1], col[2]);
+        circle(x, cy, r * 2);
+        fill(255, 255, 255, 110);
+        circle(x - r * 0.3, cy - r * 0.3, r * 0.6);
+      } else {
+        fill(70, 65, 100);
+        circle(x, cy, r * 1.7);
+      }
+    }
+  }
+
+  function drawCountdown() {
+    background(0);
+    if (countdownValue >= 1) {
+      if (countdownTimer === 0) tone(countdownValue === 1 ? 880 : 660, countdownValue === 1 ? 880 : 660, 0.16, 'sine', 0.2);
+      const s = 1 + 0.15 * (1 - countdownTimer / COUNTDOWN_FRAMES);
+      noStroke();
+      fill(255);
+      textAlign(CENTER, CENTER);
+      textStyle(BOLD);
+      textSize(Math.min(canvasW, canvasH) * 0.34 * s);
+      text(String(countdownValue), canvasW / 2, canvasH / 2);
+      countdownTimer++;
+      if (countdownTimer >= COUNTDOWN_FRAMES) {
+        countdownTimer = 0;
+        countdownValue--;
+      }
+    } else {
+      startGame(GAME_ORDER[gameIdx]);
+    }
+  }
+
+  function drawCrown(cx, baseY, w) {
+    const h = w * 0.5;
+    noStroke();
+    fill(255, 205, 60);
+    beginShape();
+    vertex(cx - w / 2, baseY);
+    vertex(cx - w / 2, baseY - h);
+    vertex(cx - w / 4, baseY - h * 0.55);
+    vertex(cx, baseY - h * 1.15);
+    vertex(cx + w / 4, baseY - h * 0.55);
+    vertex(cx + w / 2, baseY - h);
+    vertex(cx + w / 2, baseY);
+    endShape(CLOSE);
+    fill(255, 240, 170);
+    circle(cx - w / 2, baseY - h, w * 0.1);
+    circle(cx, baseY - h * 1.15, w * 0.1);
+    circle(cx + w / 2, baseY - h, w * 0.1);
+  }
+
+  function drawResult() {
+    drawLobbyBackground();
+    resultTimer++;
+    const W = canvasW, H = canvasH;
+
+    noStroke();
+    fill(255);
+    textAlign(CENTER, CENTER);
+    textStyle(BOLD);
+    textSize(H * 0.06);
+    text('가장 열심히 누른 색!', W / 2, H * 0.12);
+
+    const n = resultKeys.length;
+    if (n > 0) {
+      const spacing = Math.min(H * 0.3, W * 0.85 / n);
+      const r = Math.min(H * 0.13, spacing * 0.4);
+      const pulse = 1 + 0.04 * Math.sin(frameCount * 0.15);
+      for (let i = 0; i < n; i++) {
+        const col = KEY_COLORS[resultKeys[i]];
+        const x = W / 2 + (i - (n - 1) / 2) * spacing;
+        const y = H * 0.4;
+        noStroke();
+        fill(col[0], col[1], col[2], 60);
+        circle(x, y, r * 2 * pulse * 1.45);
+        fill(col[0], col[1], col[2]);
+        circle(x, y, r * 2 * pulse);
+        fill(255, 255, 255, 110);
+        circle(x - r * 0.3 * pulse, y - r * 0.3 * pulse, r * 0.6);
+        drawCrown(x, y - r * pulse * 1.05, r * 0.9);
+      }
+    }
+
+    // 막대 그래프 (참가자별 누른 횟수)
+    const bn = activeKeys.length;
+    let maxC = 1;
+    for (const k of activeKeys) maxC = Math.max(maxC, pressCounts[k]);
+    const slot = Math.min(W * 0.1, W * 0.8 / bn);
+    const bw = slot * 0.62;
+    const baseY = H * 0.93;
+    const maxH = H * 0.18;
+    const grow = 1 - Math.pow(1 - constrain(resultTimer / 40, 0, 1), 3);
+    for (let i = 0; i < bn; i++) {
+      const k = activeKeys[i];
+      const col = KEY_COLORS[k];
+      const x = W / 2 + (i - (bn - 1) / 2) * slot;
+      const hh = Math.max(H * 0.008, maxH * pressCounts[k] / maxC * grow);
+      noStroke();
+      fill(col[0], col[1], col[2]);
+      rect(x - bw / 2, baseY - hh, bw, hh, bw * 0.25, bw * 0.25, 0, 0);
+      fill(255);
+      textSize(H * 0.03);
+      text(String(pressCounts[k]), x, baseY - hh - H * 0.025);
+    }
+
+    drawConfetti();
+
+    if (resultTimer > RESULT_FRAMES) {
+      gameIdx++;
+      if (gameIdx >= GAME_ORDER.length) {
+        resetReady();
+        gameState = 'ready';
+      } else {
+        startCountdown();
+      }
+    }
+  }
+
+  // =====================================================
+  //  1) 풍선 터뜨리기
+  // =====================================================
+  let balloonStartR, balloonMaxR, balloonMarbleR, balloonRadius;
+  let balloonMarbles = [];
+  let balloonParticles = [];
+  let balloonSquish = 0;
+  let balloonPopped = false;
+  let balloonPopTimer = 0;
+
+  function balloonCenter() { return { x: canvasW / 2, y: canvasH * 0.4 }; }
+  function balloonTargetRadius() {
+    const p = gameProgress();
+    return Math.sqrt(balloonStartR * balloonStartR + p * (balloonMaxR * balloonMaxR - balloonStartR * balloonStartR));
+  }
+  function balloonColor() {
+    return lerpColor(color(255, 214, 92), color(255, 90, 95), gameProgress());
+  }
+
+  function resetBalloonState() {
+    balloonRadius = balloonStartR;
+    balloonMarbles = [];
+    balloonParticles = [];
+    balloonSquish = 0;
+    balloonPopped = false;
+    balloonPopTimer = 0;
+  }
+
+  function growBalloon(k) {
+    if (balloonPopped) return;
+    registerPress(k);
+    balloonSquish = 1;
+    const c = balloonCenter();
+    const x = c.x + random(-0.4, 0.4) * balloonRadius;
+    const y = c.y - balloonRadius * 0.75;
+    balloonMarbles.push({ x, y, px: x - random(-1, 1), py: y - 1, r: balloonMarbleR, col: KEY_COLORS[k] });
+    if (totalPresses >= targetPresses) doPopBalloon();
+  }
+
+  function updateBalloonMarbles() {
+    const c = balloonCenter();
+    stepMarbles(balloonMarbles, canvasH * 0.0009, 0.995, balloonMarbleR, (m) => {
+      const dx = m.x - c.x, dy = m.y - c.y;
+      const d = Math.sqrt(dx * dx + dy * dy);
+      const lim = balloonRadius - m.r;
+      if (d > lim && lim > 0) {
+        m.x = c.x + dx / d * lim;
+        m.y = c.y + dy / d * lim;
+      }
+    });
+  }
+
+  function doPopBalloon() {
+    balloonPopped = true;
+    balloonPopTimer = 0;
+    const c = balloonCenter();
+    const sc = canvasH / 800;
+    for (const m of balloonMarbles) {
+      const dx = m.x - c.x, dy = m.y - c.y;
+      const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+      const sp = random(3, 9) * sc;
+      balloonParticles.push({
+        x: m.x, y: m.y,
+        vx: dx / d * sp + (m.x - m.px), vy: dy / d * sp - 2 + (m.y - m.py),
+        r: m.r, life: 255, col: m.col
+      });
+    }
+    balloonMarbles = [];
+    const bc = balloonColor();
+    for (let i = 0; i < 18; i++) {
+      const a = random(TWO_PI);
+      const sp = random(4, 10) * sc;
+      balloonParticles.push({
+        x: c.x + Math.cos(a) * balloonRadius * 0.8, y: c.y + Math.sin(a) * balloonRadius * 0.8,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 2,
+        r: random(0.008, 0.018) * canvasH, life: 255, col: [red(bc), green(bc), blue(bc)]
+      });
+    }
+    tone(520, 90, 0.28, 'triangle', 0.25);
+  }
+
+  function drawBalloonScene() {
+    vGradient(0, canvasH, [150, 210, 250], [235, 248, 255], 1);
+    noStroke();
+    fill(255, 244, 200, 230);
+    circle(canvasW * 0.85, canvasH * 0.12, canvasH * 0.09);
+    fill(150, 205, 140);
+    rect(0, canvasH * 0.84, canvasW, canvasH * 0.16);
+    fill(130, 190, 120);
+    rect(0, canvasH * 0.84, canvasW, canvasH * 0.02);
+
+    if (!balloonPopped) {
+      balloonRadius += (balloonTargetRadius() - balloonRadius) * 0.25;
+      updateBalloonMarbles();
+      drawBalloon();
+    } else {
+      for (const p of balloonParticles) {
+        p.x += p.vx; p.y += p.vy; p.vy += 0.28 * canvasH / 800; p.life -= 6;
+      }
+      balloonParticles = balloonParticles.filter(p => p.life > 0);
+      noStroke();
+      for (const p of balloonParticles) {
+        fill(p.col[0], p.col[1], p.col[2], Math.max(0, p.life));
+        circle(p.x, p.y, p.r * 2);
+      }
+      balloonPopTimer++;
+      if (balloonPopTimer > 150) finishGame();
+    }
+    if (balloonSquish > 0) balloonSquish = Math.max(0, balloonSquish - 0.06);
+  }
+
+  function drawBalloon() {
+    const c = balloonCenter();
+    const wobble = Math.sin(frameCount * 0.06) * 4;
+    const sq = balloonSquish * 0.18;
+    const R = balloonRadius;
+
+    stroke(140, 120, 100);
+    strokeWeight(2);
+    noFill();
+    const sy = c.y + R * 0.92;
+    beginShape();
+    for (let i = 0; i <= 10; i++) {
+      const t = i / 10;
+      vertex(c.x + Math.sin(frameCount * 0.05 + t * 6) * 10 * t, sy + t * (canvasH * 0.84 - sy));
+    }
+    endShape();
+
+    noStroke();
+    fill(balloonColor());
+    triangle(c.x - 8, c.y + R - 4, c.x + 8, c.y + R - 4, c.x, c.y + R + 10);
+
+    push();
+    translate(c.x + wobble, c.y);
+    for (const m of balloonMarbles) drawMarble(m, c.x, c.y);
+
+    const bc = balloonColor();
+    noStroke();
+    fill(red(bc), green(bc), blue(bc), 232);
+    ellipse(0, 0, R * 2 * (1 + sq), R * 2 * (1 - sq));
+    noFill();
+    stroke(255, 255, 255, 150);
+    strokeWeight(3);
+    ellipse(0, 0, R * 2 * (1 + sq), R * 2 * (1 - sq));
+    noStroke();
+    fill(255, 255, 255, 90);
+    ellipse(-R * 0.32, -R * 0.38, R * 0.5, R * 0.36);
+    pop();
+  }
+
+  // =====================================================
+  //  2) 로켓 발사
+  // =====================================================
+  let rocketMarbleR, rocketWinHalfW, rocketWinStraightH, rocketW, rocketH, rocketGroundY;
+  let rocketMarbles = [];
+  let flameParticles = [];
+  let rocketPhase = 'filling';
+  let rocketOffsetY = 0;
+  let rocketVY = 0;
+  let rocketWaitTimer = 0;
+
+  function rocketCenter() { return { x: canvasW * 0.52, y: rocketGroundY - rocketH * 0.5 - rocketOffsetY }; }
+  function rocketWindowCenter() { const rc = rocketCenter(); return { x: rc.x, y: rc.y - rocketH * 0.1 }; }
+
+  function resetRocketState() {
+    rocketPhase = 'filling';
+    rocketOffsetY = 0;
+    rocketVY = 0;
+    rocketWaitTimer = 0;
+    rocketMarbles = [];
+    flameParticles = [];
+  }
+
+  function growRocket(k) {
+    if (rocketPhase !== 'filling') return;
+    registerPress(k);
+    const wc = rocketWindowCenter();
+    const x = wc.x + random(-0.3, 0.3) * rocketWinHalfW;
+    const y = wc.y - rocketWinStraightH - rocketWinHalfW * 0.5;
+    rocketMarbles.push({ x, y, px: x - random(-0.5, 0.5), py: y - 1, r: rocketMarbleR, col: KEY_COLORS[k] });
+    if (totalPresses >= targetPresses) startLaunch();
+  }
+
+  function capsuleConstrain(m, wc) {
+    const lim = rocketWinHalfW - m.r;
+    if (lim <= 0) return;
+    const dx = m.x - wc.x, dy = m.y - wc.y;
+    if (Math.abs(dy) <= rocketWinStraightH) {
+      if (Math.abs(dx) > lim) m.x = wc.x + (dx > 0 ? lim : -lim);
+    } else {
+      const capY = wc.y + (dy > 0 ? rocketWinStraightH : -rocketWinStraightH);
+      const cdy = m.y - capY;
+      const d = Math.sqrt(dx * dx + cdy * cdy);
+      if (d > lim) {
+        m.x = wc.x + dx / d * lim;
+        m.y = capY + cdy / d * lim;
+      }
+    }
+  }
+
+  function updateRocketMarbles() {
+    const wc = rocketWindowCenter();
+    stepMarbles(rocketMarbles, canvasH * 0.001, 0.995, rocketMarbleR, (m) => capsuleConstrain(m, wc));
+  }
+
+  function startLaunch() {
+    rocketPhase = 'launching';
+    rocketOffsetY = 0;
+    rocketVY = 0;
+    rocketWaitTimer = 0;
+    tone(80, 340, 1.1, 'sawtooth', 0.2);
+  }
+
+  function updateLaunch() {
+    const prev = rocketOffsetY;
+    rocketVY += canvasH * 0.0006;
+    rocketOffsetY += rocketVY;
+    const delta = rocketOffsetY - prev;
+    for (const m of rocketMarbles) { m.y -= delta; m.py -= delta; }
+
+    const rc = rocketCenter();
+    for (let i = 0; i < 3; i++) {
+      flameParticles.push({
+        x: rc.x + random(-rocketW * 0.22, rocketW * 0.22),
+        y: rocketGroundY - rocketOffsetY * 0.04,
+        vx: random(-1.5, 1.5), vy: random(1, 3),
+        r: random(canvasH * 0.006, canvasH * 0.016),
+        life: 200, col: random() < 0.5 ? [255, 160, 60] : [255, 100, 70]
+      });
+    }
+    if (rocketOffsetY > canvasH * 1.3) {
+      rocketWaitTimer++;
+      if (rocketWaitTimer > 40) finishGame();
+    }
+  }
+
+  function drawRocketScene() {
+    // 노을 하늘
+    vGradient(0, rocketGroundY, [28, 22, 74], [255, 150, 120], 1.6);
+    noStroke();
+    for (let s of stars) {
+      const a = 120 + 100 * Math.sin(frameCount * 0.03 + s.tw);
+      fill(255, 255, 255, Math.max(0, a));
+      circle(s.x * canvasW, s.y * rocketGroundY, s.r + s.r * 0.4 * (a / 220));
+    }
+    fill(255, 200, 150, 40);
+    circle(canvasW * 0.18, rocketGroundY * 0.62, canvasH * 0.22);
+
+    // 산 + 발사장
+    fill(40, 34, 70);
+    beginShape();
+    vertex(0, rocketGroundY);
+    vertex(0, rocketGroundY - canvasH * 0.05);
+    vertex(canvasW * 0.2, rocketGroundY - canvasH * 0.09);
+    vertex(canvasW * 0.45, rocketGroundY - canvasH * 0.03);
+    vertex(canvasW * 0.7, rocketGroundY - canvasH * 0.1);
+    vertex(canvasW, rocketGroundY - canvasH * 0.04);
+    vertex(canvasW, rocketGroundY);
+    endShape(CLOSE);
+    fill(64, 58, 66);
+    rect(0, rocketGroundY, canvasW, canvasH - rocketGroundY);
+    fill(80, 74, 82);
+    for (let x = -50; x < canvasW + 50; x += canvasH * 0.09) rect(x, rocketGroundY, 3, canvasH - rocketGroundY);
+    fill(150, 140, 150, 90);
+    rect(0, rocketGroundY, canvasW, canvasH * 0.012);
+
+    drawTower();
+
+    if (rocketPhase === 'filling') updateRocketMarbles();
+    else updateLaunch();
+
+    for (const p of flameParticles) { p.x += p.vx; p.y += p.vy; p.vy += 0.05; p.life -= 6; }
+    flameParticles = flameParticles.filter(p => p.life > 0);
+    noStroke();
+    for (const p of flameParticles) {
+      fill(p.col[0], p.col[1], p.col[2], Math.max(0, p.life));
+      circle(p.x, p.y, p.r * 2);
+    }
+
+    drawRocketBody();
+  }
+
+  function drawTower() {
+    const rc = rocketCenter();
+    const tx = rc.x - rocketW * 2.1;
+    const topY = rocketGroundY - rocketH * 1.02;
+    stroke(150, 145, 160);
+    strokeWeight(3);
+    line(tx, rocketGroundY, tx, topY);
+    line(tx + rocketW * 0.4, rocketGroundY, tx + rocketW * 0.4, topY);
+    for (let y = rocketGroundY; y > topY; y -= rocketH * 0.09) {
+      line(tx, y, tx + rocketW * 0.4, y - rocketH * 0.05);
+      line(tx, y - rocketH * 0.05, tx + rocketW * 0.4, y);
+    }
+    noStroke();
+  }
+
+  function drawRocketBody() {
+    const rc = rocketCenter();
+    const cx = rc.x, cy = rc.y;
+    const bodyTop = cy - rocketH * 0.5;
+    const bodyBottom = cy + rocketH * 0.5;
+    const halfW = rocketW * 0.5;
+
+    noStroke();
+    if (rocketPhase === 'filling') {
+      const fl = 1 + Math.sin(frameCount * 0.4) * 0.15;
+      fill(255, 180, 90, 190);
+      circle(cx, bodyBottom + 6, rocketW * 0.36 * fl);
+      fill(255, 225, 140, 190);
+      circle(cx, bodyBottom + 4, rocketW * 0.2 * fl);
+    }
+
+    fill(250, 240, 224);
+    rectMode(CENTER);
+    rect(cx, (bodyTop + bodyBottom) / 2, rocketW, rocketH, rocketW * 0.45);
+    rectMode(CORNER);
+
+    fill(30, 110, 120);
+    const apexY = bodyTop - rocketW * 1.05;
+    beginShape();
+    vertex(cx - halfW, bodyTop + 2);
+    bezierVertex(cx - halfW * 0.95, bodyTop - rocketW * 0.55, cx - halfW * 0.22, apexY + rocketW * 0.18, cx, apexY);
+    bezierVertex(cx + halfW * 0.22, apexY + rocketW * 0.18, cx + halfW * 0.95, bodyTop - rocketW * 0.55, cx + halfW, bodyTop + 2);
+    endShape(CLOSE);
+
+    fill(230, 180, 60);
+    rect(cx - halfW, cy + rocketH * 0.3, rocketW, rocketH * 0.055);
+
+    fill(30, 110, 120);
+    triangle(cx - halfW, bodyBottom - rocketH * 0.16, cx - halfW - rocketW * 0.6, bodyBottom + rocketW * 0.3, cx - halfW, bodyBottom + 2);
+    triangle(cx + halfW, bodyBottom - rocketH * 0.16, cx + halfW + rocketW * 0.6, bodyBottom + rocketW * 0.3, cx + halfW, bodyBottom + 2);
+
+    // 연료창 (눈금 실린더)
+    const wc = rocketWindowCenter();
+    const r = rocketWinHalfW;
+    const capBottomY = wc.y + rocketWinStraightH + r;
+    const totalH = 2 * (rocketWinStraightH + r);
+    const fillY = capBottomY - gameProgress() * totalH;
+
+    push();
+    noStroke();
+    fill(35, 42, 66);
+    drawCapsule(wc.x, wc.y, r + 8, rocketWinStraightH);
+
+    const ctx = drawingContext;
+    ctx.save();
+    pathCapsule(ctx, wc.x, wc.y, r, rocketWinStraightH);
+    ctx.clip();
+    noStroke();
+    fill(255, 195, 80, 150);
+    rect(wc.x - r - 6, fillY, (r + 6) * 2, (capBottomY + 6) - fillY);
+    ctx.restore();
+
+    stroke(255, 255, 255, 130);
+    strokeWeight(2);
+    for (let i = 1; i < 5; i++) {
+      const ty = capBottomY - (i / 5) * totalH;
+      line(wc.x - r, ty, wc.x - r + 10, ty);
+      line(wc.x + r - 10, ty, wc.x + r, ty);
+    }
+    noStroke();
+
+    for (const m of rocketMarbles) drawMarble(m, 0, 0);
+
+    noFill();
+    stroke(255, 255, 255, 190);
+    strokeWeight(4);
+    drawCapsuleStroke(wc.x, wc.y, r, rocketWinStraightH);
+    pop();
+  }
+
+  function pathCapsule(ctx, x, y, r, straightH) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y - straightH);
+    ctx.arc(x, y - straightH, r, 0, -Math.PI, true);
+    ctx.lineTo(x - r, y + straightH);
+    ctx.arc(x, y + straightH, r, Math.PI, 0, true);
+    ctx.closePath();
+  }
+  function drawCapsule(x, y, r, straightH) {
+    noStroke();
+    rectMode(CENTER);
+    rect(x, y, r * 2, straightH * 2);
+    rectMode(CORNER);
+    circle(x, y - straightH, r * 2);
+    circle(x, y + straightH, r * 2);
+  }
+  function drawCapsuleStroke(x, y, r, straightH) {
+    arc(x, y - straightH, r * 2, r * 2, PI, TWO_PI);
+    arc(x, y + straightH, r * 2, r * 2, 0, PI);
+    line(x - r, y - straightH, x - r, y + straightH);
+    line(x + r, y - straightH, x + r, y + straightH);
+  }
+
+  // =====================================================
+  //  3) 공룡알 깨기
+  // =====================================================
+  const EGG_CRACKS = 6;
+  const EGG_SEGS = 9;
+  let eggA, eggB, eggCX, eggCY, eggSpotR;
+  let eggSpots = [];
+  let eggCracks = [];
+  let eggShards = [];
+  let eggBits = [];
+  let eggPhase = 'cracking';
+  let eggKick = 0, eggKickDir = 1, eggP = 0, eggHatchTimer = 0;
+
+  function eggLocal(u, v) { return { x: eggA * u * (1 - 0.16 * v), y: -eggB * v }; }
+
+  function resetEggState() {
+    eggSpots = []; eggShards = []; eggBits = [];
+    eggPhase = 'cracking';
+    eggKick = 0; eggP = 0; eggHatchTimer = 0;
+    eggCracks = [];
+    for (let c = 0; c < EGG_CRACKS; c++) {
+      const base = (c / EGG_CRACKS) * TWO_PI + random(-0.3, 0.3);
+      let u = random(-0.1, 0.1), v = random(-0.1, 0.1);
+      const pts = [[u, v]];
+      for (let s = 1; s <= EGG_SEGS; s++) {
+        const ang = base + random(-0.6, 0.6);
+        const step = 0.95 / EGG_SEGS;
+        u += Math.cos(ang) * step;
+        v += Math.sin(ang) * step;
+        const rr = Math.sqrt(u * u + v * v);
+        if (rr > 0.95) { u *= 0.95 / rr; v *= 0.95 / rr; }
+        pts.push([u, v]);
+      }
+      eggCracks.push(pts);
+    }
+  }
+
+  function growEgg(k) {
+    if (eggPhase !== 'cracking') return;
+    registerPress(k);
+    eggKick = 1;
+    eggKickDir = random() < 0.5 ? -1 : 1;
+    const t = random(TWO_PI), u = Math.sqrt(random()) * 0.92;
+    eggSpots.push({ u: u * Math.cos(t), v: u * Math.sin(t), col: KEY_COLORS[k] });
+    if (totalPresses >= targetPresses) startHatch();
+  }
+
+  function startHatch() {
+    eggPhase = 'hatching';
+    eggHatchTimer = 0;
+    const sc = canvasH / 800;
+    const n = 14;
+    for (let i = 0; i < n; i++) {
+      const t = 0.12 + (i + random(0.2, 0.8)) / n * (Math.PI - 0.24);
+      const p = eggLocal(Math.cos(t) * 0.95, Math.sin(t) * 0.95);
+      const ang = Math.atan2(p.y, p.x);
+      const sp = random(5, 11) * sc;
+      eggShards.push({
+        x: eggCX + p.x, y: eggCY + p.y,
+        vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 4 * sc,
+        rot: random(TWO_PI), vr: random(-0.25, 0.25), s: random(0.045, 0.085) * canvasH
+      });
+    }
+    for (const s of eggSpots) {
+      const p = eggLocal(s.u, s.v);
+      eggBits.push({
+        x: eggCX + p.x, y: eggCY + p.y,
+        vx: random(-6, 6) * sc, vy: random(-12, -3) * sc,
+        r: eggSpotR, life: 255, col: s.col
+      });
+    }
+    eggSpots = [];
+    tone(500, 900, 0.12, 'sine', 0.25, 0);
+    tone(700, 1200, 0.15, 'sine', 0.25, 0.14);
+  }
+
+  function drawFern(x, y, len, flip) {
+    push();
+    translate(x, y);
+    scale(flip, 1);
+    noStroke();
+    for (let i = 0; i < 7; i++) {
+      const L = len * (1 - Math.abs(i - 3) * 0.08);
+      push();
+      rotate(-HALF_PI + (i - 3) * 0.3);
+      fill(i % 2 ? 76 : 92, i % 2 ? 140 : 156, 80);
+      ellipse(L / 2, 0, L, L * 0.2);
+      pop();
+    }
+    pop();
+  }
+
+  function drawEggBackground() {
+    const W = canvasW, H = canvasH, gy = H * 0.8;
+    vGradient(0, gy, [255, 204, 140], [255, 240, 205], 1);
+    noStroke();
+    fill(255, 236, 170, 120);
+    circle(W * 0.18, H * 0.2, H * 0.3);
+    fill(255, 240, 190);
+    circle(W * 0.18, H * 0.2, H * 0.17);
+
+    fill(190, 200, 130);
+    ellipse(W * 0.25, gy, W * 0.7, H * 0.22);
+    fill(170, 190, 120);
+    ellipse(W * 0.7, gy, W * 0.8, H * 0.2);
+
+    const vx = W * 0.8, vw = W * 0.34, vh = H * 0.28;
+    fill(125, 90, 80);
+    triangle(vx - vw / 2, gy, vx + vw / 2, gy, vx, gy - vh);
+    fill(255, 120, 60);
+    ellipse(vx, gy - vh + H * 0.008, vw * 0.14, H * 0.022);
+    for (let i = 0; i < 4; i++) {
+      const t = ((frameCount * 0.4 + i * 40) % 160) / 160;
+      fill(150, 140, 150, 150 * (1 - t));
+      circle(vx + Math.sin(t * 6 + i) * vw * 0.04 + t * vw * 0.12, gy - vh - t * H * 0.2, H * (0.03 + t * 0.05));
+    }
+
+    fill(120, 162, 88);
+    rect(0, gy, W, H - gy);
+    fill(104, 146, 76);
+    rect(0, gy, W, H * 0.015);
+
+    drawFern(W * 0.07, gy + H * 0.03, H * 0.2, 1);
+    drawFern(W * 0.12, gy + H * 0.06, H * 0.14, -1);
+    drawFern(W * 0.93, gy + H * 0.03, H * 0.2, -1);
+    drawFern(W * 0.88, gy + H * 0.06, H * 0.14, 1);
+  }
+
+  function drawEggBody() {
+    stroke(226, 208, 174);
+    strokeWeight(canvasH * 0.006);
+    fill(252, 243, 222);
+    beginShape();
+    for (let t = 0; t < TWO_PI; t += 0.05) {
+      const p = eggLocal(Math.cos(t), Math.sin(t));
+      vertex(p.x, p.y);
+    }
+    endShape(CLOSE);
+    noStroke();
+    fill(255, 255, 255, 130);
+    ellipse(-eggA * 0.35, -eggB * 0.45, eggA * 0.28, eggB * 0.2);
+  }
+
+  function drawEggCup() {
+    const a = Math.asin(0.1);
+    const t1 = Math.PI + a, t2 = TWO_PI - a;
+    const p1 = eggLocal(Math.cos(t1), Math.sin(t1));
+    const p2 = eggLocal(Math.cos(t2), Math.sin(t2));
+    fill(252, 243, 222);
+    stroke(226, 208, 174);
+    strokeWeight(canvasH * 0.006);
+    beginShape();
+    vertex(p1.x, p1.y);
+    for (let t = t1 + 0.05; t < t2 - 0.03; t += 0.05) {
+      const p = eggLocal(Math.cos(t), Math.sin(t));
+      vertex(p.x, p.y);
+    }
+    vertex(p2.x, p2.y);
+    for (let i = 1; i <= 7; i++) {
+      vertex(p2.x + (p1.x - p2.x) * i / 8, p2.y - (i % 2 === 1 ? eggB * 0.1 : 0));
+    }
+    endShape(CLOSE);
+  }
+
+  function drawDino(cx, baseY, h, s) {
+    if (s <= 0.001) return;
+    push();
+    translate(cx, baseY);
+    scale(s);
+    noStroke();
+    fill(96, 184, 108);
+    triangle(h * 0.28, -h * 0.12, h * 0.6, -h * 0.02, h * 0.26, -h * 0.3);
+    fill(110, 200, 122);
+    ellipse(0, -h * 0.4, h * 0.72, h * 0.82);
+    fill(205, 236, 170);
+    ellipse(0, -h * 0.3, h * 0.44, h * 0.52);
+    fill(88, 168, 100);
+    circle(-h * 0.2, -h * 0.55, h * 0.08);
+    circle(h * 0.22, -h * 0.42, h * 0.06);
+    circle(-h * 0.24, -h * 0.3, h * 0.05);
+    fill(255, 170, 70);
+    for (let i = -1; i <= 1; i++) {
+      triangle(i * h * 0.15 - h * 0.06, -h * 0.78, i * h * 0.15 + h * 0.06, -h * 0.78, i * h * 0.15, -h * 0.9 + Math.abs(i) * h * 0.02);
+    }
+    fill(96, 184, 108);
+    ellipse(-h * 0.36, -h * 0.28, h * 0.14, h * 0.1);
+    ellipse(h * 0.36, -h * 0.28, h * 0.14, h * 0.1);
+    fill(255);
+    circle(-h * 0.13, -h * 0.58, h * 0.17);
+    circle(h * 0.13, -h * 0.58, h * 0.17);
+    fill(30, 30, 50);
+    circle(-h * 0.12, -h * 0.57, h * 0.09);
+    circle(h * 0.14, -h * 0.57, h * 0.09);
+    fill(255);
+    circle(-h * 0.1, -h * 0.6, h * 0.035);
+    circle(h * 0.16, -h * 0.6, h * 0.035);
+    fill(255, 150, 160, 170);
+    circle(-h * 0.25, -h * 0.47, h * 0.075);
+    circle(h * 0.25, -h * 0.47, h * 0.075);
+    noFill();
+    stroke(60, 100, 70);
+    strokeWeight(h * 0.018);
+    arc(0, -h * 0.47, h * 0.16, h * 0.1, 0.1, PI - 0.1);
+    pop();
+  }
+
+  function drawEggScene() {
+    drawEggBackground();
+    const gy = canvasH * 0.8;
+    const nestY = eggCY + eggB * 0.92, nestW = eggA * 3.4, nestH = eggB * 0.55;
+    noStroke();
+    fill(150, 100, 55);
+    ellipse(eggCX, nestY, nestW, nestH);
+    fill(120, 80, 45);
+    ellipse(eggCX, nestY + nestH * 0.04, nestW * 0.86, nestH * 0.7);
+
+    if (eggPhase === 'cracking') {
+      eggP += (gameProgress() - eggP) * 0.2;
+      eggKick *= 0.86;
+      const ang = Math.sin(frameCount * 0.9) * (0.008 + 0.05 * eggP * eggP) + eggKick * eggKickDir * 0.07;
+      const bounce = -eggKick * canvasH * 0.012;
+      push();
+      translate(eggCX, eggCY + bounce);
+      rotate(ang);
+      drawEggBody();
+      noStroke();
+      for (const s of eggSpots) {
+        const p = eggLocal(s.u, s.v);
+        fill(s.col[0], s.col[1], s.col[2], 235);
+        circle(p.x, p.y, eggSpotR * 2);
+      }
+      const total = EGG_CRACKS * EGG_SEGS;
+      const rev = Math.floor(eggP * total);
+      stroke(92, 64, 46);
+      strokeWeight(Math.max(2, canvasH * 0.005));
+      noFill();
+      for (let s = 0; s < rev; s++) {
+        const c = s % EGG_CRACKS, k = Math.floor(s / EGG_CRACKS);
+        const a = eggCracks[c][k], b = eggCracks[c][k + 1];
+        const pa = eggLocal(a[0], a[1]), pb = eggLocal(b[0], b[1]);
+        line(pa.x, pa.y, pb.x, pb.y);
+      }
+      pop();
+    } else {
+      eggHatchTimer++;
+      const t = eggHatchTimer;
+      const sc = canvasH / 800;
+      const ds = easeOutBack(constrain((t - 8) / 36, 0, 1));
+      const hop = t > 50 ? -Math.abs(Math.sin((t - 50) * 0.12)) * canvasH * 0.025 : 0;
+      drawDino(eggCX, eggCY + eggB * 0.3 + hop, eggB * 1.55, ds);
+
+      push();
+      translate(eggCX, eggCY);
+      drawEggCup();
+      pop();
+
+      for (const s of eggShards) {
+        s.x += s.vx; s.y += s.vy; s.vy += 0.35 * sc; s.rot += s.vr;
+        push();
+        translate(s.x, s.y);
+        rotate(s.rot);
+        fill(252, 243, 222);
+        stroke(226, 208, 174);
+        strokeWeight(2);
+        triangle(-s.s * 0.6, s.s * 0.4, s.s * 0.6, s.s * 0.5, 0, -s.s * 0.7);
+        pop();
+      }
+      noStroke();
+      for (const b of eggBits) { b.x += b.vx; b.y += b.vy; b.vy += 0.4 * sc; b.life -= 3; }
+      eggBits = eggBits.filter(b => b.life > 0);
+      for (const b of eggBits) {
+        fill(b.col[0], b.col[1], b.col[2], Math.max(0, b.life));
+        circle(b.x, b.y, b.r * 2);
+      }
+      if (t > 210) finishGame();
+    }
+
+    noFill();
+    stroke(120, 80, 45);
+    strokeWeight(canvasH * 0.022);
+    arc(eggCX, nestY, nestW, nestH, 0.05, PI - 0.05);
+    noStroke();
+  }
+
+  // =====================================================
+  //  4) 달리기 (마지막 게임)
+  // =====================================================
+  let laneH, blockTop, startX, finishX, runnerR;
+  let runners = [];
+  let runDone = false;
+  let runWinner = null;
+  let runTimer = 0;
+  let runDust = [];
+
+  function resetRunState() {
+    runners = activeKeys.map((k, i) => ({ key: k, col: KEY_COLORS[k], lane: i, prog: 0, energy: 0, phase: random(TWO_PI) }));
+    runDone = false;
+    runWinner = null;
+    runTimer = 0;
+    runDust = [];
+  }
+
+  function growRun(k) {
+    if (runDone) return;
+    registerPress(k);
+    const r = runners.find(q => q.key === k);
+    if (r) r.energy = Math.min(1, r.energy + 0.4);
+    if (pressCounts[k] >= RACE_TARGET) {
+      runDone = true;
+      runWinner = k;
+      runTimer = 0;
+      spawnConfetti(120, activeKeys.map(q => KEY_COLORS[q]));
+      playFanfare();
+    }
+  }
+
+  function drawRunner(x, y, R, col, phase) {
+    push();
+    translate(x, y);
+    noStroke();
+    fill(0, 0, 0, 40);
+    ellipse(0, R * 1.5, R * 1.6, R * 0.35);
+
+    stroke(60, 45, 70);
+    strokeWeight(R * 0.22);
+    for (let i = 0; i < 2; i++) {
+      const ph = phase + i * Math.PI;
+      const fx = Math.sin(ph) * R * 0.7;
+      const fy = R * 1.45 - Math.max(0, Math.cos(ph)) * R * 0.45;
+      line(Math.sin(ph) * R * 0.1, R * 0.85, fx, fy);
+    }
+
+    stroke(col[0] * 0.65, col[1] * 0.65, col[2] * 0.65);
+    strokeWeight(R * 0.1);
+    fill(col[0], col[1], col[2]);
+    circle(0, 0, R * 2);
+
+    noStroke();
+    fill(255);
+    circle(R * 0.38, -R * 0.2, R * 0.56);
+    fill(30, 30, 50);
+    circle(R * 0.48, -R * 0.2, R * 0.28);
+    fill(255);
+    circle(R * 0.52, -R * 0.27, R * 0.1);
+    noFill();
+    stroke(60, 40, 60);
+    strokeWeight(R * 0.08);
+    arc(R * 0.35, R * 0.15, R * 0.5, R * 0.35, 0.2, PI - 0.2);
+    pop();
+  }
+
+  function drawRunScene() {
+    const W = canvasW, H = canvasH;
+    const n = Math.max(1, playerCount);
+    background(112, 172, 102);
+
+    // 관중석
+    noStroke();
+    fill(78, 78, 104);
+    rect(0, 0, W, H * 0.2);
+    fill(60, 60, 86);
+    rect(0, H * 0.188, W, H * 0.012);
+    const bob = runDone ? 2.5 : 1;
+    for (const c of crowd) {
+      fill(c.col[0], c.col[1], c.col[2]);
+      circle(c.x * W, H * 0.02 + c.y * H * 0.15 + Math.sin(frameCount * 0.15 + c.x * 40) * H * 0.006 * bob, H * 0.014);
+    }
+
+    // 트랙
+    for (let i = 0; i < n; i++) {
+      fill(i % 2 ? 224 : 214, i % 2 ? 134 : 118, i % 2 ? 106 : 92);
+      rect(0, blockTop + i * laneH, W, laneH);
+    }
+    stroke(255, 255, 255, 220);
+    strokeWeight(3);
+    for (let i = 0; i <= n; i++) line(0, blockTop + i * laneH, W, blockTop + i * laneH);
+    strokeWeight(5);
+    line(startX, blockTop, startX, blockTop + n * laneH);
+
+    noStroke();
+    const sq = W * 0.011;
+    const rows = Math.ceil(n * laneH / sq);
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < 2; c++) {
+        fill((r + c) % 2 ? 20 : 255);
+        rect(finishX + c * sq, blockTop + r * sq, sq, Math.min(sq, blockTop + n * laneH - (blockTop + r * sq)));
+      }
+    }
+
+    // 선수
+    for (const r of runners) {
+      const target = Math.min(1, pressCounts[r.key] / RACE_TARGET);
+      r.prog += (target - r.prog) * 0.15;
+      r.energy *= 0.93;
+      r.phase += 0.12 + r.energy * 0.7;
+      const laneY = blockTop + r.lane * laneH + laneH / 2;
+      const x = startX + runnerR * 1.2 + r.prog * (finishX - startX - runnerR * 2.2);
+      let jump = 0;
+      if (runDone && r.key === runWinner) jump = Math.abs(Math.sin(runTimer * 0.2)) * H * 0.05;
+      drawRunner(x, laneY - runnerR * 0.35 - jump, runnerR, r.col, r.phase);
+      if (r.energy > 0.45 && frameCount % 3 === 0) {
+        runDust.push({ x: x - runnerR * 0.8, y: laneY + runnerR * 1.1, r: runnerR * 0.25, life: 180 });
+      }
+    }
+
+    noStroke();
+    for (const d of runDust) { d.x -= 1.2; d.y -= 0.3; d.r += 0.15; d.life -= 8; }
+    runDust = runDust.filter(d => d.life > 0);
+    for (const d of runDust) {
+      fill(255, 245, 230, d.life * 0.5);
+      circle(d.x, d.y, d.r * 2);
+    }
+
+    if (runDone) {
+      drawConfetti();
+      runTimer++;
+      if (runTimer > 180) finishGame();
+    }
+  }
+
+  // =====================================================
+  //  입력
+  // =====================================================
+  function keyFromEvent(e) {
+    if (e && e.code && e.code.indexOf('Key') === 0) return e.code.slice(3).toLowerCase();
+    return (typeof key === 'string') ? key.toLowerCase() : '';
+  }
+
+  function keyPressed(e) {
+    const k = keyFromEvent(e);
+    if (!KEY_COLORS[k]) return;
+
+    if (gameState === 'ready') {
+      if (!keyState[k]) {
+        keyState[k] = true;
+        readyPlayers[k] = true;
+        pulseTime[k] = frameCount;
+      }
+      return;
+    }
+    if (keyState[k]) return;
+    keyState[k] = true;
+    if (activeKeys.indexOf(k) < 0) return;
+
+    if (gameState === 'balloon') growBalloon(k);
+    else if (gameState === 'rocket') growRocket(k);
+    else if (gameState === 'egg') growEgg(k);
+    else if (gameState === 'run') growRun(k);
+  }
+
+  function keyReleased(e) {
+    const k = keyFromEvent(e);
+    if (KEY_COLORS[k]) keyState[k] = false;
+  }
+</script>
+</body>
+</html>
